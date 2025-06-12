@@ -1,3 +1,4 @@
+console.log("--- I AM RUNNING THE CORRECT AND SAVED ADDON.JS FILE ---");
 const { addonBuilder } = require('stremio-addon-sdk');
 require('dotenv').config(); // Ensure environment variables are loaded
 const fs = require('fs').promises;
@@ -79,6 +80,7 @@ const { getCuevanaStreams } = require('./providers/cuevana.js'); // Import from 
 const { getHianimeStreams } = require('./providers/hianime.js'); // Import from hianime.js
 const { getStreamContent } = require('./providers/vidsrcextractor.js'); // Import from vidsrcextractor.js
 const { getVidZeeStreams } = require('./providers/VidZee.js'); // NEW: Import from VidZee.js
+const { getVixStreamContent } = require('./providers/vixsrcextractor.js'); // Import from vixsrcextractor.js
 
 // --- Constants ---
 const TMDB_API_URL = 'https://api.themoviedb.org/3';
@@ -293,6 +295,9 @@ async function getVidSrcStreams(tmdbId, mediaType, seasonNum = null, episodeNum 
     }
 }
 
+
+
+
 // --- Stream Caching Functions ---
 // Ensure stream cache directory exists
 const ensureStreamCacheDir = async () => {
@@ -314,7 +319,8 @@ ensureStreamCacheDir().catch(err => console.error(`[Stream Cache] Error creating
 // Generate cache key for a provider's streams
 const getStreamCacheKey = (provider, type, id, seasonNum = null, episodeNum = null, region = null, cookie = null) => {
     // Basic key parts
-    let key = `streams_${provider}_${type}_${id}`;
+    // CACHE BUSTING: Added "v2" to the key to invalidate all old caches.
+    let key = `streams_v2_${provider}_${type}_${id}`;
     
     // Add season/episode for TV series
     if (seasonNum !== null && episodeNum !== null) {
@@ -710,6 +716,10 @@ builder.defineStreamHandler(async (args) => {
             return [];
         },
         
+
+
+
+
         // Xprime provider with cache integration
         xprime: async () => {
             if (!ENABLE_XPRIME_PROVIDER) { // Check if Xprime is disabled
@@ -985,6 +995,22 @@ builder.defineStreamHandler(async (args) => {
         }
         },
 
+        // VixSrc provider with cache integration
+        vixsrc: async () => {
+            if (!shouldFetch('vixsrc')) return [];
+            const cachedStreams = await getStreamFromCache('vixsrc', tmdbTypeFromId, tmdbId, seasonNum, episodeNum);
+            if (cachedStreams) {
+                return cachedStreams.map(stream => ({ ...stream, provider: 'VixSrc' }));
+            }
+
+            console.log(`[VixSrc] Fetching new streams for TMDB ID: ${tmdbId}`);
+            const streams = await getVixStreamContent(tmdbId, tmdbTypeFromId, seasonNum, episodeNum);
+
+            await saveStreamToCache('vixsrc', tmdbTypeFromId, tmdbId, streams, streams.length > 0 ? 'ok' : 'failed', seasonNum, episodeNum);
+            
+            return streams.map(stream => ({ ...stream, provider: 'VixSrc' }));
+        },
+
         // VidZee provider with cache integration
         vidzee: async () => {
             if (!ENABLE_VIDZEE_PROVIDER) { // Check if VidZee is globally disabled
@@ -1041,7 +1067,8 @@ builder.defineStreamHandler(async (args) => {
             providerFetchFunctions.cuevana(),
             providerFetchFunctions.hianime(),
             providerFetchFunctions.vidsrc(),
-            providerFetchFunctions.vidzee()
+            providerFetchFunctions.vidzee(),
+            providerFetchFunctions.vixsrc()
         ]);
         
         // Process results into streamsByProvider object
@@ -1053,7 +1080,8 @@ builder.defineStreamHandler(async (args) => {
             'Cuevana': ENABLE_CUEVANA_PROVIDER && shouldFetch('cuevana') ? filterStreamsByQuality(providerResults[4], minQualitiesPreferences.cuevana, 'Cuevana') : [],
             'Hianime': shouldFetch('hianime') ? filterStreamsByQuality(providerResults[5], minQualitiesPreferences.hianime, 'Hianime') : [],
             'VidSrc': shouldFetch('vidsrc') ? filterStreamsByQuality(providerResults[6], minQualitiesPreferences.vidsrc, 'VidSrc') : [],
-            'VidZee': ENABLE_VIDZEE_PROVIDER && shouldFetch('vidzee') ? filterStreamsByQuality(providerResults[7], minQualitiesPreferences.vidzee, 'VidZee') : []
+            'VidZee': ENABLE_VIDZEE_PROVIDER && shouldFetch('vidzee') ? filterStreamsByQuality(providerResults[7], minQualitiesPreferences.vidzee, 'VidZee') : [],
+            'VixSrc': shouldFetch('vixsrc') ? filterStreamsByQuality(providerResults[8], minQualitiesPreferences.vixsrc, 'VixSrc') : []
         };
 
         // Sort streams by quality for each provider
@@ -1063,7 +1091,7 @@ builder.defineStreamHandler(async (args) => {
 
         // Combine streams in the preferred provider order
         combinedRawStreams = [];
-        const providerOrder = ['ShowBox', 'Hianime', 'Xprime.tv', 'HollyMovieHD', 'Soaper TV', 'VidZee', 'Cuevana', 'VidSrc'];
+        const providerOrder = ['ShowBox', 'Hianime', 'Xprime.tv', 'HollyMovieHD', 'Soaper TV', 'VidZee', 'Cuevana', 'VidSrc', 'VixSrc'];
         providerOrder.forEach(providerKey => {
             if (streamsByProvider[providerKey] && streamsByProvider[providerKey].length > 0) {
                 combinedRawStreams.push(...streamsByProvider[providerKey]);
@@ -1088,8 +1116,47 @@ builder.defineStreamHandler(async (args) => {
     console.log(`Total streams after provider-ordered sorting: ${sortedCombinedStreams.length}`);
         
     const stremioStreamObjects = sortedCombinedStreams.map((stream) => {
+        // --- THIS IS THE FIX: Special handling for VixSrc streams ---
+        if (stream.provider === 'VixSrc') {
+            // Build the main title part (e.g., "Gran Turismo (2023)")
+            let displayTitle;
+            if (tmdbTypeFromId === 'tv' && seasonNum !== null && episodeNum !== null && movieOrSeriesTitle) {
+                displayTitle = `${movieOrSeriesTitle} S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
+            } else if (movieOrSeriesTitle) {
+                if (tmdbTypeFromId === 'movie' && movieOrSeriesYear) {
+                    displayTitle = `${movieOrSeriesTitle} (${movieOrSeriesYear})`;
+                } else {
+                    displayTitle = movieOrSeriesTitle;
+                }
+            } else {
+                displayTitle = stream.title || "Unknown Title";
+            }
+
+            // Now, create the final multi-line title.
+            let finalTitle = displayTitle;
+            if (stream.title) {
+                 finalTitle += `\n${stream.title}`; // Add the "▶️ Auto-Select..." part on a new line
+            }
+
+            // Reconstruct the behaviorHints to use 'headers' which is better recognized by native players
+            return {
+                name: stream.name,
+                title: finalTitle,
+                url: stream.url,
+                type: 'url',
+                behaviorHints: {
+                    notWebReady: true,
+                    headers: {
+                        // Extract the Referer from the original hints provided by the extractor
+                        "Referer": stream.behaviorHints.proxyHeaders.request.Referer
+                    }
+                }
+            };
+        }
+
+        // --- Existing logic for all other providers ---
         const qualityLabel = stream.quality || 'UNK'; // UNK for unknown
-        
+
         let displayTitle;
         if (tmdbTypeFromId === 'tv' && seasonNum !== null && episodeNum !== null && movieOrSeriesTitle) {
             displayTitle = `${movieOrSeriesTitle} S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
@@ -1125,10 +1192,6 @@ builder.defineStreamHandler(async (args) => {
             if (langForDisplay === 'SPANISH') {
                 langForDisplay = 'ESP';
             }
-            // Add other specific mappings here if they become necessary in the future, e.g.:
-            // else if (langForDisplay === 'LATINO') {
-            //     langForDisplay = 'LAT';
-            // }
             providerDisplayName = `Cuevana ${langForDisplay} 🎭`;
         } else if (stream.provider === 'Hianime') {
             // For Hianime, language is 'dub' or 'sub' from the stream object
@@ -1139,29 +1202,20 @@ builder.defineStreamHandler(async (args) => {
         let nameDisplay;
         if (stream.provider === 'Cuevana') {
             let qualitySuffix = '';
-            const quality = stream.quality || 'UNK'; // qualityLabel is essentially stream.quality
-            const qualityNumberMatch = quality.match(/^(\d+)p$/); // Match "720p", "1080p" etc.
+            const quality = stream.quality || 'UNK';
+            const qualityNumberMatch = quality.match(/^(\d+)p$/);
             
             if (qualityNumberMatch) {
                 const resolution = parseInt(qualityNumberMatch[1], 10);
                 if (resolution >= 1080) {
-                    qualitySuffix = ` - ${quality}`; // e.g., " - 1080p"
+                    qualitySuffix = ` - ${quality}`;
                 }
-                // If below 1080p, qualitySuffix remains empty, so no quality is shown
             } 
-            // If it's 'auto', 'UNK', or a bitrate (e.g., '700k'), qualitySuffix also remains empty.
             
             nameDisplay = `${providerDisplayName}${qualitySuffix}`;
-            // Note: flagEmoji is typically not applicable to Cuevana's stream URLs with current logic
         } else if (stream.provider === 'Hianime') {
-            // Hianime specific display (Quality is included in title from hianime.js)
-            // So, we might just use the stream.title directly or format similarly to Cuevana if preferred
-            // For now, let's assume stream.title is already formatted as `Hianime CATEGORY - Quality`
             nameDisplay = stream.title || `${providerDisplayName} - ${stream.quality || 'Auto'}`;
-            // If stream.title already includes providerDisplayName, we can simplify:
-            // nameDisplay = stream.title; 
-        } else { // For other providers (ShowBox, Xprime, etc.)
-            const qualityLabel = stream.quality || 'UNK';
+        } else { // For other providers
             if (flagEmoji) {
                 nameDisplay = `${flagEmoji} ${providerDisplayName} - ${qualityLabel}`;
             } else {
@@ -1171,37 +1225,20 @@ builder.defineStreamHandler(async (args) => {
         
         const nameVideoTechTags = [];
         if (stream.codecs && Array.isArray(stream.codecs)) {
-            // For Xprime.tv, keep the original behavior (only show highest priority HDR codec)
             if (stream.provider === 'Xprime.tv') {
-                if (stream.codecs.includes('DV')) {
-                    nameVideoTechTags.push('DV');
-                } else if (stream.codecs.includes('HDR10+')) {
-                    nameVideoTechTags.push('HDR10+');
-                } else if (stream.codecs.includes('HDR')) {
-                    nameVideoTechTags.push('HDR');
-                }
+                if (stream.codecs.includes('DV')) nameVideoTechTags.push('DV');
+                else if (stream.codecs.includes('HDR10+')) nameVideoTechTags.push('HDR10+');
+                else if (stream.codecs.includes('HDR')) nameVideoTechTags.push('HDR');
             } 
-            // For ShowBox, include all HDR-related codecs
             else if (stream.provider === 'ShowBox') {
-                if (stream.codecs.includes('DV')) {
-                    nameVideoTechTags.push('DV');
-                }
-                if (stream.codecs.includes('HDR10+')) {
-                    nameVideoTechTags.push('HDR10+');
-                }
-                if (stream.codecs.includes('HDR')) {
-                    nameVideoTechTags.push('HDR');
-                }
+                if (stream.codecs.includes('DV')) nameVideoTechTags.push('DV');
+                if (stream.codecs.includes('HDR10+')) nameVideoTechTags.push('HDR10+');
+                if (stream.codecs.includes('HDR')) nameVideoTechTags.push('HDR');
             }
-            // For any other provider, use the original behavior
             else {
-                if (stream.codecs.includes('DV')) {
-                    nameVideoTechTags.push('DV');
-                } else if (stream.codecs.includes('HDR10+')) {
-                    nameVideoTechTags.push('HDR10+');
-                } else if (stream.codecs.includes('HDR')) {
-                    nameVideoTechTags.push('HDR');
-                }
+                if (stream.codecs.includes('DV')) nameVideoTechTags.push('DV');
+                else if (stream.codecs.includes('HDR10+')) nameVideoTechTags.push('HDR10+');
+                else if (stream.codecs.includes('HDR')) nameVideoTechTags.push('HDR');
             }
         }
         if (nameVideoTechTags.length > 0) {
@@ -1215,15 +1252,7 @@ builder.defineStreamHandler(async (args) => {
 
         if (stream.codecs && Array.isArray(stream.codecs) && stream.codecs.length > 0) {
             stream.codecs.forEach(codec => {
-                if (['DV', 'HDR10+', 'HDR', 'SDR'].includes(codec)) {
-                    titleParts.push(codec);
-                } else if (['Atmos', 'TrueHD', 'DTS-HD MA'].includes(codec)) {
-                    titleParts.push(codec);
-                } else if (['H.265', 'H.264', 'AV1'].includes(codec)) {
-                    titleParts.push(codec);
-                } else if (['EAC3', 'AC3', 'AAC', 'Opus', 'MP3', 'DTS-HD', 'DTS'].includes(codec)) { 
-                    titleParts.push(codec);
-                } else if (['10-bit', '8-bit'].includes(codec)) {
+                if (['DV', 'HDR10+', 'HDR', 'SDR', 'Atmos', 'TrueHD', 'DTS-HD MA', 'H.265', 'H.264', 'AV1', 'EAC3', 'AC3', 'AAC', 'Opus', 'MP3', 'DTS-HD', 'DTS', '10-bit', '8-bit'].includes(codec)) {
                     titleParts.push(codec);
                 } else {
                     titleParts.push(codec); 
@@ -1232,27 +1261,25 @@ builder.defineStreamHandler(async (args) => {
         }
             
         const titleSecondLine = titleParts.join(" • ");
-        let finalTitle = titleSecondLine ? `${displayTitle}
-${titleSecondLine}` : displayTitle;
+        let finalTitle = titleSecondLine ? `${displayTitle}\n${titleSecondLine}` : displayTitle;
 
-        // Add warning for ShowBox if no user cookie is present
         if (stream.provider === 'ShowBox' && !userCookie) {
             const warningMessage = "⚠️ Slow? Add personal FebBox cookie in addon config for faster streaming.";
-            finalTitle += `
-${warningMessage}`;
+            finalTitle += `\n${warningMessage}`;
         }
 
         return {
             name: nameDisplay, 
             title: finalTitle, 
             url: stream.url,
-            type: 'url', // CRITICAL: This is the type of the stream itself, not the content
+            type: 'url',
             availability: 2, 
             behaviorHints: {
-                notWebReady: true // As per the working example, indicates Stremio might need to handle it carefully or use external player
+                notWebReady: true
             }
         };
     });
+        
 
     console.log("--- BEGIN Stremio Stream Objects to be sent ---");
     // Log first 3 streams to keep logs shorter
@@ -1297,4 +1324,4 @@ ${warningMessage}`;
 });
 
 // Build and export the addon
-module.exports = builder.getInterface(); 
+module.exports = builder.getInterface();

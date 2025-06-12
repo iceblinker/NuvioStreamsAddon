@@ -233,7 +233,7 @@ const FEBBOX_PLAYER_URL = "https://www.febbox.com/file/player";
 const FEBBOX_FILE_SHARE_LIST_URL = "https://www.febbox.com/file/file_share_list";
 // MODIFICATION: Remove SCRAPER_API_URL
 // const SCRAPER_API_URL = 'https://api.scraperapi.com/';
-const TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
+const TMDB_API_KEY = 'f15af7d9d74be77ba29f60f525c37348';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 // Determine cache directory based on environment
 // Use /tmp/.cache when running on Vercel, otherwise use local .cache directory
